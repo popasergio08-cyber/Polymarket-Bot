@@ -11,11 +11,17 @@ POLY_SECRET = os.getenv('SECRET')
 PASSPHRASE = os.getenv('PASSPHRASE')
 WALLET = os.getenv('WALLET_ADDRESS')
 
+from py_clob_client_v2.clob_types import ApiCreds
+
 client = ClobClient(
     host='https://clob.polymarket.com',
     chain_id=137,
     key=PRIVATE_KEY,
-    creds={'apiKey': POLY_KEY, 'secret': POLY_SECRET, 'passphrase': PASSPHRASE},
+    creds=ApiCreds(
+        [REDACTED]
+        api_secret=POLY_SECRET,
+        api_passphrase=PASSPHRASE
+    ),
     signature_type=1,
     funder=WALLET
 )

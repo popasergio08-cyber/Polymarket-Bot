@@ -1,7 +1,4 @@
 flask
 py-clob-client-v2
 gunicorn
-flask
-py-clob-client-v2
-gunicorn
 requests

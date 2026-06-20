@@ -1,0 +1,3 @@
+flask
+py-clob-client-v2
+gunicorn

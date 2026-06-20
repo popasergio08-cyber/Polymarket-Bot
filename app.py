@@ -1,141 +1,243 @@
-import os, json, time, threading, requests
 from flask import Flask, request, jsonify
-from py_clob_client_v2 import ClobClient, OrderArgs
-from py_clob_client_v2.clob_types import ApiCreds
-from py_clob_client_v2.order_builder.constants import BUY
+import threading
+import time
+import requests
+import os
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, BalanceAllowanceParams, AssetType
 
 app = Flask(__name__)
 
-PRIVATE_KEY = os.getenv('PRIVATE_KEY')
-POLY_KEY = os.getenv('API_KEY')
-POLY_SECRET = os.getenv('SECRET')
-PASSPHRASE = os.getenv('PASSPHRASE')
-WALLET = os.getenv('WALLET_ADDRESS')
+HOST = "https://clob.polymarket.com"
+CHAIN_ID = 137
+PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
+POLY_KEY = os.environ.get("POLY_KEY")
+POLY_SECRET = os.environ.get("POLY_SECRET")
+PASSPHRASE = os.environ.get("PASSPHRASE")
+WALLET_ADDRESS = os.environ.get("WALLET_ADDRESS")
 
-client = ClobClient(
-    host='https://clob.polymarket.com',
-    chain_id=137,
-    key=PRIVATE_KEY,
-    creds=ApiCreds(
+def get_client():
+    creds = ApiCreds(
         [REDACTED]
         api_secret=POLY_SECRET,
         api_passphrase=PASSPHRASE
-    ),
-    signature_type=1,
-    funder=WALLET
-)
-
-def get_prices():
+    )
+    client = ClobClient(
+        HOST,
+        key=PRIVATE_KEY,
+        chain_id=CHAIN_ID,
+        creds=creds,
+        signature_type=1,
+        funder=WALLET_ADDRESS
+    )
+    return client
+def fetch_btc_market():
+    now = int(time.time())
+    block = (now // 900) * 900
+    slug = f"btc-updown-15m-{block}"
     try:
-        now = time.time()
-        block_sec = int(now // 900) * 900
-        slug = f'btc-updown-15m-{block_sec}'
-        r = requests.get(
-            'https://gamma-api.polymarket.com/markets',
-            params={'slug': slug, 'active': 'true', 'limit': '5'},
-            timeout=5
-        )
-        markets = r.json()
-        if isinstance(markets, dict):
-            markets = markets.get('data', [])
-        for m in markets:
-            outcomes = json.loads(m.get('outcomes', '[]'))
-            if 'Up' in outcomes and 'Down' in outcomes:
-                prices = json.loads(m.get('outcomePrices', '[]'))
-                tokens = json.loads(m.get('clobTokenIds', '[]'))
-                up_idx = outcomes.index('Up')
-                dn_idx = outcomes.index('Down')
-                return {
-                    'upPrice': float(prices[up_idx]),
-                    'downPrice': float(prices[dn_idx]),
-                    'upTokenId': tokens[up_idx],
-                    'downTokenId': tokens[dn_idx],
-                    'marketSlug': m.get('slug', ''),
-                    'marketId': str(m.get('id', '')),
-                    'endDate': m.get('endDate', ''),
-                    'conditionId': m.get('conditionId', '')
-                }
+        url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if not data:
+            return None
+        m = data[0]
+        tokens = m.get("tokens", [])
+        up_token = next((t for t in tokens if t.get("outcome","").upper() == "UP"), None)
+        down_token = next((t for t in tokens if t.get("outcome","").upper() == "DOWN"), None)
+        if not up_token or not down_token:
+            return None
+        return {
+            "marketId": str(m.get("id","")),
+            "marketSlug": slug,
+            "conditionId": m.get("conditionId",""),
+            "endDate": m.get("endDateIso") or m.get("endDate",""),
+            "upPrice": float(up_token.get("price", 0)),
+            "downPrice": float(down_token.get("price", 0)),
+            "upTokenId": up_token.get("token_id",""),
+            "downTokenId": down_token.get("token_id","")
+        }
     except Exception as e:
-        print(f'get_prices error: {e}')
-    return None
-@app.route('/')
-def health():
-    return jsonify({'status': 'ok'})
+        return None
+        @app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok"})
 
-@app.route('/check', methods=['POST'])
+@app.route("/prices", methods=["GET"])
+def prices():
+    m = fetch_btc_market()
+    if not m:
+        return jsonify({"error": "market not found"}), 404
+    return jsonify(m)
+
+@app.route("/check", methods=["POST"])
 def check():
-    """
-    Controlla il prezzo ogni secondo per 55 secondi.
-    Se trova UP o DOWN nella soglia, risponde subito con i dati.
-    Altrimenti dopo 55 secondi risponde con hasSignal: false.
-    Il body deve contenere: minPrice, maxPrice, state (free/waitingSecond/completed), firstBought
-    """
     body = request.get_json(force=True) or {}
-    min_price = float(body.get('minPrice', 0.56))
-    max_price = float(body.get('maxPrice', 0.64))
-    state = body.get('state', 'free')
-    first_bought = body.get('firstBought', None)
-
-    deadline = time.time() + 55
+    status = body.get("status", "free")
+    first_bought = body.get("firstBought", None)
+    last_market_id = body.get("lastMarketId", "")
+    notified_market_id = body.get("notifiedMarketId", "")
+    min_price = float(body.get("minPrice", 0.56))
+    max_price = float(body.get("maxPrice", 0.64))
+    stop_price = float(body.get("stopPrice", 0.34))
+    restart_price = float(body.get("restartPrice", 0.50))
+    first_amount = float(body.get("firstAmount", 5))
+    stop_amount = float(body.get("stopAmount", 2.5))
+    restart_amount = float(body.get("restartAmount", 5))
+deadline = time.time() + 55
 
     while time.time() < deadline:
-        d = get_prices()
-        if d:
-            up = d['upPrice']
-            dn = d['downPrice']
+        m = fetch_btc_market()
+        if not m:
+            time.sleep(1)
+            continue
 
-            if state == 'free':
-                if min_price <= up <= max_price:
-                    return jsonify({**d, 'hasSignal': True, 'side': 'UP',
-                                    'amount': 5, 'tokenId': d['upTokenId'],
-                                    'price': up, 'reason': f'UP a {int(up*100)}¢ acquisto 5euro'})
-                if min_price <= dn <= max_price:
-                    return jsonify({**d, 'hasSignal': True, 'side': 'DOWN',
-                                    'amount': 5, 'tokenId': d['downTokenId'],
-                                    'price': dn, 'reason': f'DOWN a {int(dn*100)}¢ acquisto 5euro'})
+        market_id = m["marketId"]
+        up_price = m["upPrice"]
+        down_price = m["downPrice"]
 
-            elif state == 'waitingSecond':
-                if first_bought == 'up':
-                    if dn >= 0.34:
-                        return jsonify({**d, 'hasSignal': True, 'side': 'DOWN',
-                                        'amount': 2.5, 'tokenId': d['downTokenId'],
-                                        'price': dn, 'reason': f'DOWN a {int(dn*100)}¢ STOP 2.5euro'})
-                    if up < min_price and dn >= 0.50:
-                        return jsonify({**d, 'hasSignal': True, 'side': 'DOWN',
-                                        'amount': 5, 'tokenId': d['downTokenId'],
-                                        'price': dn, 'reason': f'UP scesa, DOWN a {int(dn*100)}¢ riparte 5euro'})
-                elif first_bought == 'down':
-                    if up >= 0.34:
-                        return jsonify({**d, 'hasSignal': True, 'side': 'UP',
-                                        'amount': 2.5, 'tokenId': d['upTokenId'],
-                                        'price': up, 'reason': f'UP a {int(up*100)}¢ STOP 2.5euro'})
-                    if dn < min_price and up >= 0.50:
-                        return jsonify({**d, 'hasSignal': True, 'side': 
-                                        'UP',
-                                        'amount': 5, 'tokenId': d['upTokenId'],
-                                        'price': up, 'reason': f'DOWN scesa, UP a {int(up*100)}¢ riparte 5euro'})
+        is_new_market = (market_id != last_market_id)
+        if is_new_market:
+            status = "free"
+            first_bought = None
+            last_market_id = market_id
 
-        time.sleep(1)
+        should_notify = is_new_market and (market_id != notified_market_id)
+        if should_notify:
+            notified_market_id = market_id
+            new_state = {
+                "status": status,
+                "firstBought": first_bought,
+                "lastMarketId": last_market_id,
+                "notifiedMarketId": notified_market_id
+            }
+            return jsonify({
+                "action": "newMarket",
+                "isNewMarket": True,
+                "upPrice": up_price,
+                "downPrice": down_price,
+                "marketId": market_id,
+                "marketSlug": m["marketSlug"],
+                "conditionId": m["conditionId"],
+                "endDate": m["endDate"],
+                "newState": new_state
+            })
+    if status == "completed":
+            time.sleep(1)
+            continue
 
-    # Nessun segnale in 55 secondi
-    last = get_prices() or {}
-    return jsonify({**last, 'hasSignal': False})
+        order = None
 
-@app.route('/order', methods=['POST'])
+        if status == "free":
+            if min_price <= up_price <= max_price:
+                order = {
+                    "side": "UP",
+                    "tokenId": m["upTokenId"],
+                    "price": up_price,
+                    "amount": first_amount,
+                    "reason": f"UP a {int(up_price*100)}c acquisto {first_amount}euro"
+                }
+                status = "waitingSecond"
+                first_bought = "up"
+            elif min_price <= down_price <= max_price:
+                order = {
+                    "side": "DOWN",
+                    "tokenId": m["downTokenId"],
+                    "price": down_price,
+                    "amount": first_amount,
+                    "reason": f"DOWN a {int(down_price*100)}c acquisto {first_amount}euro"
+                }
+                status = "waitingSecond"
+                first_bought = "down"
+
+        elif status == "waitingSecond":
+            if first_bought == "up":
+                if down_price >= stop_price:
+                    order = {
+                        "side": "DOWN",
+                        "tokenId": m["downTokenId"],
+                        "price": down_price,
+                        "amount": stop_amount,
+                        "reason": f"DOWN a {int(down_price*100)}c STOP {stop_amount}euro"
+                    }
+                    status = "completed"
+                    first_bought = None
+                elif up_price < min_price and down_price >= restart_price:
+                    order = {
+                        "side": "DOWN",
+                    "tokenId": m["downTokenId"],
+                        "price": down_price,
+                        "amount": restart_amount,
+                        "reason": f"UP scesa, DOWN a {int(down_price*100)}c riparte {restart_amount}euro"
+                    }
+                    status = "free"
+                    first_bought = None
+            elif first_bought == "down":
+                if up_price >= stop_price:
+                    order = {
+                        "side": "UP",
+                        "tokenId": m["upTokenId"],
+                        "price": up_price,
+                        "amount": stop_amount,
+                        "reason": f"UP a {int(up_price*100)}c STOP {stop_amount}euro"
+                    }
+                    status = "completed"
+                    first_bought = None
+                elif down_price < min_price and up_price >= restart_price:
+                    order = {
+                        "side": "UP",
+                        "tokenId": m["upTokenId"],
+                        "price": up_price,
+                        "amount": restart_amount,
+                        "reason": f"DOWN scesa, UP a {int(up_price*100)}c riparte {restart_amount}euro"
+                    }
+                    status = "free"
+                    first_bought = None
+
+        if order:
+            new_state = {
+                "status": status,
+                "firstBought": first_bought,
+                "lastMarketId": last_market_id,
+                "notifiedMarketId": notified_market_id
+            }
+            return jsonify({
+                "action": "order",
+                "isNewMarket": False,
+                **order,
+                "upPrice": up_price,
+                "downPrice": down_price,
+                "marketId": market_id,
+                "marketSlug": m["marketSlug"],
+                "conditionId": m["conditionId"],
+                "endDate": m["endDate"],
+                "newState": new_state
+            })
+    time.sleep(1)
+
+    return jsonify({"action": "none", "isNewMarket": False})
+
+@app.route("/order", methods=["POST"])
 def place_order():
     try:
-        data = request.get_json(force=True)
-        token_id = str(data['tokenId'])
-        price = float(data['price'])
-        amount = float(data['amount'])
-        size = round(amount / price, 2)
-        result = client.create_and_post_order(
-            OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
-        )
-        order_id = result.get('orderID', 'N/A') if isinstance(result, dict) else 'N/A'
-        return jsonify({'success': True, 'orderID': order_id})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        body = request.get_json(force=True) or {}
+        token_id = body.get("tokenId")
+        price = float(body.get("price", 0))
+        amount = float(body.get("amount", 0))
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+        client = get_client()
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=price,
+            size=amount,
+            side="BUY",
+            order_type=OrderType.GTC
+        )
+        resp = client.create_and_post_order(order_args)
+        order_id = resp.get("orderID") or resp.get("id") or resp.get("order_id","")
+        return jsonify({"success": True, "orderID": order_id})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)

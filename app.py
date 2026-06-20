@@ -20,50 +20,45 @@ client = ClobClient(
     funder=WALLET
 )
 
-# Prezzi aggiornati ogni secondo da thread interno
 latest_prices = {
-    'upPrice': 0,
-    'downPrice': 0,
-    'upTokenId': '',
-    'downTokenId': '',
-    'marketSlug': '',
-    'marketId': '',
-    'endDate': '',
-    'conditionId': '',
+    'upPrice': 0, 'downPrice': 0,
+    'upTokenId': '', 'downTokenId': '',
+    'marketSlug': '', 'marketId': '',
+    'endDate': '', 'conditionId': '',
     'updatedAt': 0
 }
+
 def fetch_prices():
     while True:
         try:
-            now_ms = time.time()
-            block_sec = int(now_ms // 900) * 900
+            now = time.time()
+            block_sec = int(now // 900) * 900
             slug = f'btc-updown-15m-{block_sec}'
             r = requests.get(
                 'https://gamma-api.polymarket.com/markets',
                 params={'slug': slug, 'active': 'true', 'limit': '5'},
                 timeout=5
             )
-            data = r.json()
-            markets = data if isinstance(data, list) else data.get('data', [])
+            markets = r.json()
+            if isinstance(markets, dict):
+                markets = markets.get('data', [])
             for m in markets:
                 outcomes = json.loads(m.get('outcomes', '[]'))
                 if 'Up' in outcomes and 'Down' in outcomes:
-                    end_date = m.get('endDate', '')
-                    if end_date and time.time() < time.mktime(time.strptime(end_date, '%Y-%m-%dT%H:%M:%SZ')):
-                        prices = json.loads(m.get('outcomePrices', '[]'))
-                        tokens = json.loads(m.get('clobTokenIds', '[]'))
-                        up_idx = outcomes.index('Up')
-                        dn_idx = outcomes.index('Down')
-                        latest_prices['upPrice'] = float(prices[up_idx])
-                        latest_prices['downPrice'] = float(prices[dn_idx])
-                        latest_prices['upTokenId'] = tokens[up_idx]
-                        latest_prices['downTokenId'] = tokens[dn_idx]
-                        latest_prices['marketSlug'] = m.get('slug', '')
-                        latest_prices['marketId'] = str(m.get('id', ''))
-                        latest_prices['endDate'] = end_date
-                        latest_prices['conditionId'] = m.get('conditionId', '')
-                        latest_prices['updatedAt'] = time.time()
-                        break
+                    prices = json.loads(m.get('outcomePrices', '[]'))
+                    tokens = json.loads(m.get('clobTokenIds', '[]'))
+                    up_idx = outcomes.index('Up')
+                    dn_idx = outcomes.index('Down')
+                    latest_prices['upPrice'] = float(prices[up_idx])
+                    latest_prices['downPrice'] = float(prices[dn_idx])
+                    latest_prices['upTokenId'] = tokens[up_idx]
+                    latest_prices['downTokenId'] = tokens[dn_idx]
+                    latest_prices['marketSlug'] = m.get('slug', '')
+                    latest_prices['marketId'] = str(m.get('id', ''))
+                    latest_prices['endDate'] = m.get('endDate', '')
+                    latest_prices['conditionId'] = m.get('conditionId', '')
+                    latest_prices['updatedAt'] = time.time()
+                    break
         except Exception as e:
             print(f'fetch_prices error: {e}')
         time.sleep(1)

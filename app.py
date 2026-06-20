@@ -6,8 +6,8 @@ from py_clob_client_v2.order_builder.constants import BUY
 app = Flask(__name__)
 
 PRIVATE_KEY = os.getenv('PRIVATE_KEY')
-[REDACTED]
-[REDACTED]
+POLY_KEY = os.getenv('API_KEY')
+POLY_SECRET = os.getenv('SECRET')
 PASSPHRASE = os.getenv('PASSPHRASE')
 WALLET = os.getenv('WALLET_ADDRESS')
 
@@ -15,7 +15,7 @@ client = ClobClient(
     host='https://clob.polymarket.com',
     chain_id=137,
     key=PRIVATE_KEY,
-    creds={'apiKey': API_KEY, 'secret': SECRET, 'passphrase': PASSPHRASE},
+    creds={'apiKey': POLY_KEY, 'secret': POLY_SECRET, 'passphrase': PASSPHRASE},
     signature_type=1,
     funder=WALLET
 )
